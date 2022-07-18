@@ -84,13 +84,45 @@ class AuthException implements Exception {
 
 class StorageFileInitOptions {
   StorageFileInitOptions({
+    Duration? androidAuthenticationValidityDuration,
+    Duration? iosTouchIDAuthenticationAllowableReuseDuration,
+    this.iosTouchIDAuthenticationForceReuseContextDuration,
     this.authenticationValidityDurationSeconds = -1,
     this.authenticationRequired = true,
     this.androidBiometricOnly = true,
     this.darwinBiometricOnly = true,
-  });
+  })  : androidAuthenticationValidityDuration =
+            androidAuthenticationValidityDuration ??
+                (authenticationValidityDurationSeconds <= 0
+                    ? null
+                    : Duration(seconds: authenticationValidityDurationSeconds)),
+        iosTouchIDAuthenticationAllowableReuseDuration =
+            iosTouchIDAuthenticationAllowableReuseDuration ??
+                (authenticationValidityDurationSeconds <= 0
+                    ? null
+                    : Duration(seconds: authenticationValidityDurationSeconds));
 
+  @Deprecated('use androidAuthenticationValidityDuration instead')
   final int authenticationValidityDurationSeconds;
+
+  /// see https://developer.android.com/reference/android/security/keystore/KeyGenParameterSpec.Builder#setUserAuthenticationParameters(int,%20int)
+  final Duration? androidAuthenticationValidityDuration;
+
+  /// see https://developer.apple.com/documentation/localauthentication/lacontext/1622329-touchidauthenticationallowablere
+  /// > If the user unlocks the device using Touch ID within the specified time interval, then authentication for the receiver succeeds automatically, without prompting the user for Touch ID. This bypasses a scenario where the user unlocks the device and then is almost immediately prompted for another fingerprint.
+  /// and https://developer.apple.com/documentation/localauthentication/accessing_keychain_items_with_face_id_or_touch_id
+  /// > Note that this grace period applies specifically to device unlock with Touch ID, not keychain retrieval authentications
+  ///
+  /// If you want to avoid requiring authentication after a successful
+  /// keychain retrieval see [iosTouchIDAuthenticationForceReuseContextDuration]
+  final Duration? iosTouchIDAuthenticationAllowableReuseDuration;
+
+  /// To prevent forcing the user to authenticate again after unlocking once
+  /// we can reuse the `LAContext` object for the given amount of time.
+  /// see https://github.com/authpass/biometric_storage/pull/73
+  /// This is pretty much undocumented behavior, but works similar to
+  /// `androidAuthenticationValidityDuration`.
+  final Duration? iosTouchIDAuthenticationForceReuseContextDuration;
 
   /// Whether an authentication is required. if this is
   /// false NO BIOMETRIC CHECK WILL BE PERFORMED! and the value
@@ -115,6 +147,12 @@ class StorageFileInitOptions {
   Map<String, dynamic> toJson() => <String, dynamic>{
         'authenticationValidityDurationSeconds':
             authenticationValidityDurationSeconds,
+        'androidAuthenticationValidityDurationSeconds':
+            androidAuthenticationValidityDuration?.inSeconds,
+        'iosTouchIDAuthenticationAllowableReuseDurationSeconds':
+            iosTouchIDAuthenticationAllowableReuseDuration?.inSeconds,
+        'iosTouchIDAuthenticationForceReuseContextDurationSeconds':
+            iosTouchIDAuthenticationForceReuseContextDuration?.inSeconds,
         'authenticationRequired': authenticationRequired,
         'androidBiometricOnly': androidBiometricOnly,
         'darwinBiometricOnly': darwinBiometricOnly,
