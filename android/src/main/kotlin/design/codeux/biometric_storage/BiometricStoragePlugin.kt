@@ -262,8 +262,19 @@ class BiometricStoragePlugin : FlutterPlugin, ActivityAware, MethodCallHandler {
                     }
                 }
                 "write" -> withStorage {
-                    withAuth(CipherMode.Encrypt) {
-                        writeFile(it, requiredArgument(PARAM_WRITE_CONTENT))
+                    // RETHERA-2214: write always uses the RSA public key (see cipherForEncrypt()
+                    // / CryptographyManagerImpl.getInitializedCipherForEncryption) — Android's
+                    // Keystore never gates public-key operations behind biometric
+                    // authentication; setUserAuthenticationRequired(true) only ever constrains
+                    // the private key, used by "read" below. So this bypasses withAuth()/
+                    // authenticate() entirely: there is nothing to authenticate, and calling
+                    // authenticate() here would just show a pointless BiometricPrompt for an
+                    // operation that structurally cannot need one. Still dispatched onto the
+                    // worker executor (not the calling/UI thread), matching how withAuth()'s own
+                    // callback already runs off-thread, since this still does real file I/O and
+                    // crypto work.
+                    worker(resultError) {
+                        writeFile(cipherForEncrypt(), requiredArgument(PARAM_WRITE_CONTENT))
                         ui(resultError) { result.success(true) }
                     }
                 }

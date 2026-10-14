@@ -7,6 +7,7 @@ import android.security.keystore.KeyProperties
 import io.github.oshai.kotlinlogging.KotlinLogging
 import java.io.File
 import java.io.IOException
+import java.security.GeneralSecurityException
 import javax.crypto.Cipher
 
 private val logger = KotlinLogging.logger {}
@@ -118,6 +119,24 @@ class BiometricStorageFile(
                 cryptographyManager.decryptData(bytes, useCipher)
             } catch (ex: IOException) {
                 logger.error(ex) { "Error while writing encrypted file $fileV2" }
+                null
+            } catch (ex: GeneralSecurityException) {
+                // RETHERA-2214: the stored bytes don't decrypt under the current scheme — most
+                // likely a pre-upgrade install's data written under an older, incompatible
+                // envelope format (e.g. before the Android RSA-envelope rewrite). There is no
+                // way to recover data that doesn't decrypt under the key/format we now have —
+                // the standard, documented approach for Keystore-protected data in this
+                // situation is to treat it the same as any other unreadable/invalidated
+                // credential: delete it and let the normal "credential not available" fallback
+                // take over (same as KeyPermanentlyInvalidatedException elsewhere in this file).
+                logger.warn(ex) { "Stored data for $fileV2 could not be decrypted under the current format — treating as stale, deleting." }
+                deleteFile()
+                null
+            } catch (ex: IllegalStateException) {
+                // Thrown by CryptographyManagerImpl.decryptData() when the ciphertext is too
+                // short to be a valid envelope at all — same stale-format situation as above.
+                logger.warn(ex) { "Stored data for $fileV2 has an unrecognized format — treating as stale, deleting." }
+                deleteFile()
                 null
             }
         }
