@@ -277,6 +277,7 @@ class CryptographyManagerImpl(
         )
         paramsBuilder.apply {
             setDigests(KeyProperties.DIGEST_SHA256)
+            setMgf1Digests(KeyProperties.DIGEST_SHA256)
             setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_OAEP)
             setKeySize(RSA_KEY_SIZE)
             // RETHERA-2214: this only ever constrains the PRIVATE key's use (decrypt) — the
