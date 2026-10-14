@@ -30,9 +30,12 @@ import java.security.KeyStore
 import java.security.KeyStoreException
 import java.security.PrivateKey
 import java.security.PublicKey
+import java.security.spec.MGF1ParameterSpec
+import java.security.spec.PSource
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
+import javax.crypto.spec.OAEPParameterSpec
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
@@ -126,10 +129,32 @@ class CryptographyManagerImpl(
         private const val ENCRYPTION_BLOCK_MODE = KeyProperties.BLOCK_MODE_GCM
         private const val ENCRYPTION_PADDING = KeyProperties.ENCRYPTION_PADDING_NONE
         private const val ENCRYPTION_ALGORITHM = KeyProperties.KEY_ALGORITHM_AES
-        private const val RSA_TRANSFORMATION = "RSA/ECB/OAEPWithSHA-256AndMGF1Padding"
+        // Generic OAEP in the transformation string, not "OAEPWithSHA-256AndMGF1Padding" — that
+        // specific string only pins the main OAEP digest; the MGF1 digest is left to whatever
+        // the provider/HAL defaults to, which caused a device-specific (confirmed: Samsung
+        // Galaxy A55, but not reproducible in principle to any specific OEM) KeyMint failure
+        // during device testing: cipher.init() succeeded, but doDecrypt/doFinal() failed deep
+        // in the Keystore2 HAL with an opaque "UNKNOWN_ERROR", because the key's declared
+        // digest and whatever MGF1 the HAL assumed didn't actually agree.
+        // KeyGenParameterSpec.Builder.setMgf1Digests() would be the "declare it once, at
+        // key-gen time" fix, but it isn't available at this module's compileSdk (31) — confirmed
+        // by trying to compile against it, not assumed. OAEPParameterSpec below is the
+        // standard-JCA equivalent, specified explicitly on every cipher.init() call instead,
+        // and has been available since the earliest Android API levels.
+        private const val RSA_TRANSFORMATION = "RSA/ECB/OAEPPadding"
 
         private const val IV_SIZE_IN_BYTES = 12
         private const val TAG_SIZE_IN_BYTES = 16
+
+        // SHA-256 for both the main OAEP digest and MGF1's digest — matches the key's own
+        // setDigests(DIGEST_SHA256) at generation time, and removes the ambiguity the
+        // plain-string transformation left to the provider/HAL to guess at.
+        private val OAEP_PARAMS = OAEPParameterSpec(
+            "SHA-256",
+            "MGF1",
+            MGF1ParameterSpec.SHA256,
+            PSource.PSpecified.DEFAULT,
+        )
 
     }
 
@@ -141,7 +166,7 @@ class CryptographyManagerImpl(
         // authentication, regardless of setUserAuthenticationRequired(true) on the key pair
         // (that constraint only ever applies to the private-key half). Confirmed by Android's
         // own Keystore documentation, not assumed.
-        cipher.init(Cipher.ENCRYPT_MODE, keyPair.public)
+        cipher.init(Cipher.ENCRYPT_MODE, keyPair.public, OAEP_PARAMS)
         return cipher
     }
 
@@ -162,7 +187,7 @@ class CryptographyManagerImpl(
         // setUserAuthenticationRequired(true)/setUserAuthenticationParameters(...) — same
         // mechanism the old symmetric key used, just now applying to the private key alone.
         try {
-            cipher.init(Cipher.DECRYPT_MODE, keyPair.private)
+            cipher.init(Cipher.DECRYPT_MODE, keyPair.private, OAEP_PARAMS)
             Log.e("RETHERA_DEBUG", "getInitializedCipherForDecryption: cipher.init() succeeded for $keyName")
         } catch (ex: Exception) {
             Log.e("RETHERA_DEBUG", "getInitializedCipherForDecryption: cipher.init() THREW ${ex.javaClass.simpleName}: ${ex.message}", ex)
@@ -276,8 +301,12 @@ class CryptographyManagerImpl(
             KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
         )
         paramsBuilder.apply {
+            // setMgf1Digests(DIGEST_SHA256) would be the "declare it once, at key-gen time"
+            // way to pin the MGF1 digest, but it isn't available at this module's compileSdk
+            // (31) — confirmed by trying to compile against it, not assumed. OAEP_PARAMS above,
+            // passed explicitly to cipher.init() on every encrypt/decrypt call instead, is the
+            // standard-JCA equivalent and is what actually fixes this.
             setDigests(KeyProperties.DIGEST_SHA256)
-            setMgf1Digests(KeyProperties.DIGEST_SHA256)
             setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_OAEP)
             setKeySize(RSA_KEY_SIZE)
             // RETHERA-2214: this only ever constrains the PRIVATE key's use (decrypt) — the
