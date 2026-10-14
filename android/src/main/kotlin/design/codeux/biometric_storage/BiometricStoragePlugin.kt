@@ -281,11 +281,9 @@ class BiometricStoragePlugin : FlutterPlugin, ActivityAware, MethodCallHandler {
                 else -> result.notImplemented()
             }
         } catch (e: MethodCallException) {
-            android.util.Log.e("RETHERA_DEBUG", "onMethodCall(${call.method}): MethodCallException ${e.errorCode}: ${e.errorMessage}", e)
             logger.error(e) { "Error while processing method call ${call.method}" }
             result.error(e.errorCode, e.errorMessage, e.errorDetails)
         } catch (e: Exception) {
-            android.util.Log.e("RETHERA_DEBUG", "onMethodCall(${call.method}): UNCAUGHT ${e.javaClass.simpleName}: ${e.message}", e)
             logger.error(e) { "Error while processing method call '${call.method}'" }
             result.error("Unexpected Error", e.message, e.toCompleteString())
         }
@@ -317,7 +315,6 @@ class BiometricStoragePlugin : FlutterPlugin, ActivityAware, MethodCallHandler {
         try {
             cb()
         } catch (e: Throwable) {
-            android.util.Log.e("RETHERA_DEBUG", "worker: caught ${e.javaClass.simpleName}: ${e.message}", e)
             logger.error(e) { "Error while calling worker callback. This must not happen." }
             handler.post {
                 onError(

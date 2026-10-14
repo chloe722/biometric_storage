@@ -20,7 +20,6 @@ package design.codeux.biometric_storage
 
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
-import android.util.Log
 import io.github.oshai.kotlinlogging.KotlinLogging
 import java.io.File
 import java.nio.charset.Charset
@@ -188,13 +187,7 @@ class CryptographyManagerImpl(
         // This init() call is the one that's actually gated by the key's own
         // setUserAuthenticationRequired(true)/setUserAuthenticationParameters(...) — same
         // mechanism the old symmetric key used, just now applying to the private key alone.
-        try {
-            cipher.init(Cipher.DECRYPT_MODE, keyPair.private)
-            Log.e("RETHERA_DEBUG", "getInitializedCipherForDecryption: cipher.init() succeeded for $keyName")
-        } catch (ex: Exception) {
-            Log.e("RETHERA_DEBUG", "getInitializedCipherForDecryption: cipher.init() THREW ${ex.javaClass.simpleName}: ${ex.message}", ex)
-            throw ex
-        }
+        cipher.init(Cipher.DECRYPT_MODE, keyPair.private)
         return cipher
     }
 
@@ -208,12 +201,10 @@ class CryptographyManagerImpl(
         val iv = aesCipher.iv
         assert(iv.size == IV_SIZE_IN_BYTES)
 
-        // RSA-OAEP can only wrap a small, fixed-size payload (far smaller than a typical
-        // refresh token) — wrapping just the 32-byte ephemeral AES key, not the actual
-        // plaintext, is exactly what the envelope-encryption pattern is for.
-        Log.e("RETHERA_DEBUG", "encryptData: ephemeralKey.encoded.size=${ephemeralKey.encoded.size} rsaCipher.algorithm=${cipher.algorithm}")
+        // RSA can only wrap a small, fixed-size payload (far smaller than a typical refresh
+        // token) — wrapping just the 32-byte ephemeral AES key, not the actual plaintext, is
+        // exactly what the envelope-encryption pattern is for.
         val wrappedKey = cipher.doFinal(ephemeralKey.encoded)
-        Log.e("RETHERA_DEBUG", "encryptData: wrappedKey.size=${wrappedKey.size} (expected $RSA_WRAPPED_KEY_SIZE)")
         assert(wrappedKey.size == RSA_WRAPPED_KEY_SIZE)
 
         val ciphertext = ByteArray(wrappedKey.size + iv.size + aesCiphertext.size)
@@ -237,27 +228,15 @@ class CryptographyManagerImpl(
         val wrappedKey = ciphertext.sliceArray(0 until RSA_WRAPPED_KEY_SIZE)
         val iv = ciphertext.sliceArray(RSA_WRAPPED_KEY_SIZE until RSA_WRAPPED_KEY_SIZE + IV_SIZE_IN_BYTES)
         val aesCiphertext = ciphertext.sliceArray(RSA_WRAPPED_KEY_SIZE + IV_SIZE_IN_BYTES until ciphertext.size)
-        Log.e("RETHERA_DEBUG", "decryptData: rsaCipher.algorithm=${cipher.algorithm} wrappedKey.size=${wrappedKey.size} iv.size=${iv.size} aesCiphertext.size=${aesCiphertext.size}")
 
         // The one step actually gated by biometric authentication — cipher was obtained via
         // BiometricPrompt's CryptoObject flow (see BiometricStoragePlugin.authenticate()).
-        val aesKeyBytes = try {
-            cipher.doFinal(wrappedKey)
-        } catch (ex: Exception) {
-            Log.e("RETHERA_DEBUG", "decryptData: RSA unwrap (cipher.doFinal) FAILED: ${ex.javaClass.simpleName}: ${ex.message}", ex)
-            throw ex
-        }
-        Log.e("RETHERA_DEBUG", "decryptData: RSA unwrap succeeded, aesKeyBytes.size=${aesKeyBytes.size}")
+        val aesKeyBytes = cipher.doFinal(wrappedKey)
         val aesKey = SecretKeySpec(aesKeyBytes, ENCRYPTION_ALGORITHM)
 
         val aesCipher = getCipher()
         aesCipher.init(Cipher.DECRYPT_MODE, aesKey, GCMParameterSpec(TAG_SIZE_IN_BYTES * 8, iv))
-        val plaintext = try {
-            aesCipher.doFinal(aesCiphertext)
-        } catch (ex: Exception) {
-            Log.e("RETHERA_DEBUG", "decryptData: AES-GCM decrypt FAILED: ${ex.javaClass.simpleName}: ${ex.message}", ex)
-            throw ex
-        }
+        val plaintext = aesCipher.doFinal(aesCiphertext)
         return String(plaintext, Charset.forName("UTF-8"))
     }
 
@@ -298,11 +277,9 @@ class CryptographyManagerImpl(
         val existingPrivateKey = keyStore.getKey(realKeyName, null) as? PrivateKey
         val existingPublicKey: PublicKey? = keyStore.getCertificate(realKeyName)?.publicKey
         if (existingPrivateKey != null && existingPublicKey != null) {
-            Log.e("RETHERA_DEBUG", "getOrCreateKeyPair: REUSING existing key pair for $realKeyName (modulus=${(existingPublicKey as? java.security.interfaces.RSAPublicKey)?.modulus?.bitLength()})")
             return KeyPair(existingPublicKey, existingPrivateKey)
         }
 
-        Log.e("RETHERA_DEBUG", "getOrCreateKeyPair: GENERATING NEW key pair for $realKeyName (existingPrivateKey=${existingPrivateKey != null}, existingPublicKey=${existingPublicKey != null})")
         // Best-effort cleanup of the old v2 (OAEP) key pair, if this install ever had one — it's
         // now permanently unusable (its own stored data can't be decrypted under a different RSA
         // padding scheme either), so there's no reason to leave it occupying a Keystore slot.
