@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.security.keystore.KeyProperties
+import android.util.Log
 import io.github.oshai.kotlinlogging.KotlinLogging
 import java.io.File
 import java.io.IOException
@@ -95,9 +96,11 @@ class BiometricStorageFile(
     fun writeFile(cipher: Cipher?, content: String) {
         // cipher will be null if user does not need authentication or valid period is > -1
         val useCipher = cipher ?: cipherForEncrypt()
+        Log.e("RETHERA_DEBUG", "writeFile: masterKeyName=$masterKeyName path=$fileV2")
         try {
             val encrypted = cryptographyManager.encryptData(content, useCipher)
             fileV2.writeBytes(encrypted.encryptedPayload)
+            Log.e("RETHERA_DEBUG", "writeFile: wrote ${encrypted.encryptedPayload.size} bytes to $fileV2")
             logger.debug { "Successfully written ${encrypted.encryptedPayload.size} bytes." }
 
             return
@@ -111,16 +114,22 @@ class BiometricStorageFile(
     @Synchronized
     fun readFile(cipher: Cipher?): String? {
         val useCipher = cipher ?: cipherForDecrypt()
+        Log.e("RETHERA_DEBUG", "readFile: masterKeyName=$masterKeyName useCipher=${useCipher != null} fileExists=${fileV2.exists()} path=$fileV2")
         // if the file exists, there should *always* be a decryption key.
         if (useCipher != null && fileV2.exists()) {
             return try {
                 val bytes = fileV2.readBytes()
+                Log.e("RETHERA_DEBUG", "readFile: read ${bytes.size} bytes, about to decrypt")
                 logger.debug { "read ${bytes.size}" }
-                cryptographyManager.decryptData(bytes, useCipher)
+                val result = cryptographyManager.decryptData(bytes, useCipher)
+                Log.e("RETHERA_DEBUG", "readFile: decrypt SUCCEEDED, result length=${result.length}")
+                result
             } catch (ex: IOException) {
+                Log.e("RETHERA_DEBUG", "readFile: IOException during decrypt", ex)
                 logger.error(ex) { "Error while writing encrypted file $fileV2" }
                 null
             } catch (ex: GeneralSecurityException) {
+                Log.e("RETHERA_DEBUG", "readFile: GeneralSecurityException (${ex.javaClass.simpleName}): ${ex.message}", ex)
                 // RETHERA-2214: the stored bytes don't decrypt under the current scheme — most
                 // likely a pre-upgrade install's data written under an older, incompatible
                 // envelope format (e.g. before the Android RSA-envelope rewrite). There is no
@@ -133,6 +142,7 @@ class BiometricStorageFile(
                 deleteFile()
                 null
             } catch (ex: IllegalStateException) {
+                Log.e("RETHERA_DEBUG", "readFile: IllegalStateException: ${ex.message}", ex)
                 // Thrown by CryptographyManagerImpl.decryptData() when the ciphertext is too
                 // short to be a valid envelope at all — same stale-format situation as above.
                 logger.warn(ex) { "Stored data for $fileV2 has an unrecognized format — treating as stale, deleting." }
@@ -141,6 +151,7 @@ class BiometricStorageFile(
             }
         }
 
+        Log.e("RETHERA_DEBUG", "readFile: falling through to null (useCipher=${useCipher != null}, fileExists=${fileV2.exists()})")
         logger.debug { "File $fileV2 does not exist. returning null." }
         return null
 
