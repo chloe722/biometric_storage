@@ -146,13 +146,20 @@ class CryptographyManagerImpl(
         private const val IV_SIZE_IN_BYTES = 12
         private const val TAG_SIZE_IN_BYTES = 16
 
-        // SHA-256 for both the main OAEP digest and MGF1's digest — matches the key's own
-        // setDigests(DIGEST_SHA256) at generation time, and removes the ambiguity the
-        // plain-string transformation left to the provider/HAL to guess at.
+        // Main OAEP digest SHA-256 (matches the key's own setDigests(DIGEST_SHA256) at
+        // generation time) — but MGF1's digest must be SHA-1, NOT SHA-256. Confirmed via
+        // on-device testing: without setMgf1Digests() at key-gen time (unavailable at this
+        // module's compileSdk, see RSA_TRANSFORMATION's comment above), AndroidKeyStore only
+        // ever authorizes the key for MGF1-SHA1 — this is the same long-standing JCA
+        // convention the transformation string "OAEPWithSHA-256AndMGF1Padding" itself encodes
+        // (it names the main digest only; MGF1's digest is SHA-1 by convention, unless
+        // overridden). Asking for MGF1-SHA256 here, against a key that was never authorized
+        // for it, is exactly what produced the Keystore2 HAL's explicit
+        // "Error::Km(INCOMPATIBLE_MGF_DIGEST)" failure.
         private val OAEP_PARAMS = OAEPParameterSpec(
             "SHA-256",
             "MGF1",
-            MGF1ParameterSpec.SHA256,
+            MGF1ParameterSpec.SHA1,
             PSource.PSpecified.DEFAULT,
         )
 
