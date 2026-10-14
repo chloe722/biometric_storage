@@ -30,12 +30,9 @@ import java.security.KeyStore
 import java.security.KeyStoreException
 import java.security.PrivateKey
 import java.security.PublicKey
-import java.security.spec.MGF1ParameterSpec
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
-import javax.crypto.spec.OAEPParameterSpec
-import javax.crypto.spec.PSource
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
@@ -124,44 +121,42 @@ class CryptographyManagerImpl(
         // and throw. The leftover old-format key/file, if present, is cleaned up the same way
         // any other unreadable/invalidated credential already is — see decryptData's caller in
         // BiometricStorageFile.readFile().
+        // RETHERA-2214: v3, not v2 — the v2 RSA key pair was generated for OAEP padding
+        // (ENCRYPTION_PADDING_RSA_OAEP), which is incompatible with the PKCS1 key generated
+        // below; reusing the v2 alias would hand getOrCreateKeyPair() a key it can't use with
+        // the new padding and throw. Bumping the suffix forces a clean regeneration — the old
+        // v2 key is also explicitly deleted below once that happens (see getOrCreateKeyPair).
         private const val KEY_SUFFIX_V2 = "_rsa_v2"
+        private const val KEY_SUFFIX_V3 = "_rsa_v3"
         const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private const val ENCRYPTION_BLOCK_MODE = KeyProperties.BLOCK_MODE_GCM
         private const val ENCRYPTION_PADDING = KeyProperties.ENCRYPTION_PADDING_NONE
         private const val ENCRYPTION_ALGORITHM = KeyProperties.KEY_ALGORITHM_AES
-        // Generic OAEP in the transformation string, not "OAEPWithSHA-256AndMGF1Padding" — that
-        // specific string only pins the main OAEP digest; the MGF1 digest is left to whatever
-        // the provider/HAL defaults to, which caused a device-specific (confirmed: Samsung
-        // Galaxy A55, but not reproducible in principle to any specific OEM) KeyMint failure
-        // during device testing: cipher.init() succeeded, but doDecrypt/doFinal() failed deep
-        // in the Keystore2 HAL with an opaque "UNKNOWN_ERROR", because the key's declared
-        // digest and whatever MGF1 the HAL assumed didn't actually agree.
-        // KeyGenParameterSpec.Builder.setMgf1Digests() would be the "declare it once, at
-        // key-gen time" fix, but it isn't available at this module's compileSdk (31) — confirmed
-        // by trying to compile against it, not assumed. OAEPParameterSpec below is the
-        // standard-JCA equivalent, specified explicitly on every cipher.init() call instead,
-        // and has been available since the earliest Android API levels.
-        private const val RSA_TRANSFORMATION = "RSA/ECB/OAEPPadding"
+        // RETHERA-2214: PKCS1 v1.5, not OAEP. OAEP was tried first (per OWASP MASTG's general
+        // guidance) and its digest/MGF1 parameters were confirmed correct via on-device testing
+        // (cipher.init() succeeded) — but the actual decrypt operation (cipher.doFinal()) then
+        // failed deep in this device's (Samsung Galaxy A55) KeyMint/TEE implementation with an
+        // opaque, generic "UNKNOWN_ERROR", at the HAL's own crypto-finish step, not at key
+        // authorization. That's a HAL-level defect in this device's RSA-OAEP decrypt support,
+        // not something fixable by any Cipher-side parameter. PKCS1 v1.5 is the much older,
+        // far more universally and consistently implemented RSA padding across OEM
+        // Keymaster/KeyMint implementations — Android Keystore has supported it since the very
+        // first Keymaster version, unlike OAEP's comparatively newer and less consistent
+        // support.
+        //
+        // Accepted trade-off, deliberately: PKCS1 v1.5's classic weakness (the Bleichenbacher
+        // padding-oracle attack) requires a remote attacker to submit many adaptively-chosen
+        // ciphertexts to a decryption oracle and observe padding-validity-dependent behavior —
+        // e.g. TLS's original RSA key exchange, exposed over a network to anyone. Nothing here
+        // matches that shape: the private key never leaves this device's TEE, decryption is
+        // gated behind a live BiometricPrompt the device owner themself must pass, and the only
+        // ciphertext ever presented to it is the one this same app most recently wrote — never
+        // an attacker-chosen value from a remote, repeatable channel. There is no oracle for
+        // Bleichenbacher's attack to exploit here.
+        private const val RSA_TRANSFORMATION = "RSA/ECB/PKCS1Padding"
 
         private const val IV_SIZE_IN_BYTES = 12
         private const val TAG_SIZE_IN_BYTES = 16
-
-        // Main OAEP digest SHA-256 (matches the key's own setDigests(DIGEST_SHA256) at
-        // generation time) — but MGF1's digest must be SHA-1, NOT SHA-256. Confirmed via
-        // on-device testing: without setMgf1Digests() at key-gen time (unavailable at this
-        // module's compileSdk, see RSA_TRANSFORMATION's comment above), AndroidKeyStore only
-        // ever authorizes the key for MGF1-SHA1 — this is the same long-standing JCA
-        // convention the transformation string "OAEPWithSHA-256AndMGF1Padding" itself encodes
-        // (it names the main digest only; MGF1's digest is SHA-1 by convention, unless
-        // overridden). Asking for MGF1-SHA256 here, against a key that was never authorized
-        // for it, is exactly what produced the Keystore2 HAL's explicit
-        // "Error::Km(INCOMPATIBLE_MGF_DIGEST)" failure.
-        private val OAEP_PARAMS = OAEPParameterSpec(
-            "SHA-256",
-            "MGF1",
-            MGF1ParameterSpec.SHA1,
-            PSource.PSpecified.DEFAULT,
-        )
 
     }
 
@@ -173,7 +168,7 @@ class CryptographyManagerImpl(
         // authentication, regardless of setUserAuthenticationRequired(true) on the key pair
         // (that constraint only ever applies to the private-key half). Confirmed by Android's
         // own Keystore documentation, not assumed.
-        cipher.init(Cipher.ENCRYPT_MODE, keyPair.public, OAEP_PARAMS)
+        cipher.init(Cipher.ENCRYPT_MODE, keyPair.public)
         return cipher
     }
 
@@ -194,7 +189,7 @@ class CryptographyManagerImpl(
         // setUserAuthenticationRequired(true)/setUserAuthenticationParameters(...) — same
         // mechanism the old symmetric key used, just now applying to the private key alone.
         try {
-            cipher.init(Cipher.DECRYPT_MODE, keyPair.private, OAEP_PARAMS)
+            cipher.init(Cipher.DECRYPT_MODE, keyPair.private)
             Log.e("RETHERA_DEBUG", "getInitializedCipherForDecryption: cipher.init() succeeded for $keyName")
         } catch (ex: Exception) {
             Log.e("RETHERA_DEBUG", "getInitializedCipherForDecryption: cipher.init() THREW ${ex.javaClass.simpleName}: ${ex.message}", ex)
@@ -275,13 +270,19 @@ class CryptographyManagerImpl(
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE)
         keyStore.load(null) // Keystore must be loaded before it can be accessed
         try {
+            keyStore.deleteEntry(KEY_PREFIX + keyName + KEY_SUFFIX_V3)
+        } catch (e: KeyStoreException) {
+            logger.warn(e) { "Unable to delete key from KeyStore ${KEY_PREFIX}$keyName$KEY_SUFFIX_V3" }
+        }
+        // Best-effort cleanup of a pre-upgrade install's leftover old-format entries, if any —
+        // the v2 RSA-OAEP key (see RSA_TRANSFORMATION's doc comment for why v3 replaced it) and
+        // the original single-symmetric-key alias from before that. Neither is ever read by
+        // this version, just tidied up when we happen to be deleting anyway.
+        try {
             keyStore.deleteEntry(KEY_PREFIX + keyName + KEY_SUFFIX_V2)
         } catch (e: KeyStoreException) {
-            logger.warn(e) { "Unable to delete key from KeyStore ${KEY_PREFIX}$keyName$KEY_SUFFIX_V2" }
+            logger.warn(e) { "Unable to delete legacy v2 key from KeyStore ${KEY_PREFIX}$keyName$KEY_SUFFIX_V2" }
         }
-        // Best-effort cleanup of a pre-upgrade install's leftover old-format (single symmetric
-        // key) entry, if any — see the KEY_SUFFIX_V2 doc comment above for why it's never used
-        // for anything by this version, just tidied up when we happen to be deleting anyway.
         try {
             keyStore.deleteEntry(KEY_PREFIX + keyName)
         } catch (e: KeyStoreException) {
@@ -290,7 +291,7 @@ class CryptographyManagerImpl(
     }
 
     private fun getOrCreateKeyPair(keyName: String): KeyPair {
-        val realKeyName = KEY_PREFIX + keyName + KEY_SUFFIX_V2
+        val realKeyName = KEY_PREFIX + keyName + KEY_SUFFIX_V3
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE)
         keyStore.load(null) // Keystore must be loaded before it can be accessed
 
@@ -302,19 +303,21 @@ class CryptographyManagerImpl(
         }
 
         Log.e("RETHERA_DEBUG", "getOrCreateKeyPair: GENERATING NEW key pair for $realKeyName (existingPrivateKey=${existingPrivateKey != null}, existingPublicKey=${existingPublicKey != null})")
+        // Best-effort cleanup of the old v2 (OAEP) key pair, if this install ever had one — it's
+        // now permanently unusable (its own stored data can't be decrypted under a different RSA
+        // padding scheme either), so there's no reason to leave it occupying a Keystore slot.
+        try {
+            keyStore.deleteEntry(KEY_PREFIX + keyName + KEY_SUFFIX_V2)
+        } catch (e: KeyStoreException) {
+            logger.warn(e) { "Unable to delete superseded v2 key from KeyStore ${KEY_PREFIX}$keyName$KEY_SUFFIX_V2" }
+        }
         // if you reach here, then a new RSA key pair must be generated for that keyName
         val paramsBuilder = KeyGenParameterSpec.Builder(
             realKeyName,
             KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
         )
         paramsBuilder.apply {
-            // setMgf1Digests(DIGEST_SHA256) would be the "declare it once, at key-gen time"
-            // way to pin the MGF1 digest, but it isn't available at this module's compileSdk
-            // (31) — confirmed by trying to compile against it, not assumed. OAEP_PARAMS above,
-            // passed explicitly to cipher.init() on every encrypt/decrypt call instead, is the
-            // standard-JCA equivalent and is what actually fixes this.
-            setDigests(KeyProperties.DIGEST_SHA256)
-            setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_OAEP)
+            setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_PKCS1)
             setKeySize(RSA_KEY_SIZE)
             // RETHERA-2214: this only ever constrains the PRIVATE key's use (decrypt) — the
             // public key, once extracted via the certificate above, is usable in plain software
